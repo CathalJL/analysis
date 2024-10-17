@@ -8,25 +8,31 @@ import joblib
 import os
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, classification_report, mean_squared_error
+from sklearn.preprocessing import StandardScaler, LabelEncoder
+import pickle
 
 
+# This file has deprecated functions that need to be removed. Gui.py is becoming main file
 
-# Error handling for missing values
+
 def handle_missing_values(df):
     """
     Handle missing values automatically by filling:
     - categorical columns with the mode.
     - Numerical columns with the mean or 0.
     """
+    df = df.copy()  
+    
     for col in df.columns:
         if df[col].isnull().sum() > 0:
+            # Check if it's a numerical column
             if pd.api.types.is_numeric_dtype(df[col]):
                 if df[col].isnull().sum() / df.shape[0] > 0.3:
-                    df[col].fillna(0, inplace=True)
+                    df[col] = df[col].fillna(0)  # Fill with 0 if more than 30% are missing
                 else:
-                    df[col].fillna(df[col].mean(), inplace=True)
+                    df[col] = df[col].fillna(df[col].mean())  # Fill with mean otherwise
             else:
-                df[col].fillna(df[col].mode()[0], inplace=True)
+                df[col] = df[col].fillna(df[col].mode()[0])  # Fill categorical with mode
     return df
 
 
@@ -42,20 +48,45 @@ def load_model(model_path):
     return model
 
 
-# Preprocess the input dataset
-def preprocess_data(input_data):
+
+
+# Why do I have 2 of the same functions? TODO: rename it. it has a different purpose, shouldnt have same name though
+def preprocess_data(input_data, target_column=None, encoders=None):
     """
     Preprocess the input data:
-    - Handle missing or Nan values
+    - Handle missing or NaN values.
+    - Encode categorical variables using provided encoders.
+    - Scale numerical features.
     """
-    # Handle missing or NaN values
     input_data = handle_missing_values(input_data)
 
-    # TODO: Add addtional preprocessing steps like scaling or encoding
-    return input_data
+    input_data.columns = input_data.columns.astype(str)
 
+    if target_column:
+        features = input_data.drop(columns=[target_column])
+        target = input_data[target_column]
+    else:
+        features = input_data
+        target = None
 
-# Function to predict using the model
+    if encoders:
+        for col, le in encoders.items():
+            if col in features.columns:
+                features[col] = le.transform(features[col])
+            if col == target_column and target is not None:
+                target = le.transform(target)
+
+    numerical_cols = features.select_dtypes(include=[np.number]).columns
+    scaler = StandardScaler()
+    features[numerical_cols] = scaler.fit_transform(features[numerical_cols])
+
+    if target is not None:
+        processed_data = pd.concat([features, target], axis=1)
+    else:
+        processed_data = features
+
+    return processed_data
+
 def predict(input_data, model):
     """
     Make predictions using the given model and input data.
@@ -66,14 +97,34 @@ def predict(input_data, model):
 
 
 # Model training
+import pickle  # To save and load encoders
+
+
 def train_model(train_data, target_column, model_type='RandomForest'):
     """
-    Train a new model based on the provided data and save it
+    Train a new model based on the provided data and save it.
     """
+    # Ensure all column names are string type
+    train_data.columns = train_data.columns.astype(str)
+    
     X = train_data.drop(columns=[target_column])
     y = train_data[target_column]
 
-    # Choose between random forest or XGBoost
+    encoders = {}  # Dictionary to store encoders for categorical features
+
+    
+    for col in X.select_dtypes(include=['object']).columns:
+        le = LabelEncoder()
+        X[col] = le.fit_transform(X[col])
+        encoders[col] = le  # Save the encoder for future use
+
+    # Encode the target column if it's categorical
+    if y.dtype == 'object' or y.dtype.name == 'category':
+        target_encoder = LabelEncoder()
+        y = target_encoder.fit_transform(y)
+        encoders[target_column] = target_encoder  # Save the target encoder
+
+    # Choose between random forest or XGBoost TODO: Add more
     if model_type == 'RandomForest':
         model = RandomForestClassifier(n_estimators=100)
     elif model_type == 'XGBoost':
@@ -82,6 +133,10 @@ def train_model(train_data, target_column, model_type='RandomForest'):
         raise ValueError(f"Unknown model type: {model_type}")
 
     model.fit(X, y)
+
+    # Save feature names and encoders as model attributes
+    model.feature_names_in_ = X.columns.astype(str)
+    model.encoders = encoders
 
     return model
 
@@ -92,11 +147,11 @@ class ModelPredictionApp:
         self.root.title("ML Model Prediction App")
         self.root.geometry("400x200")
 
-        # Variables to hold paths
+
         self.csv_path = ""
         self.model_path = ""
+        self.selected_target_column = tk.StringVar()
 
-        # Add buttons for file selection
         tk.Button(root, text="Upload CSV", command=self.upload_csv).pack(pady=10)
         tk.Button(root, text="Select Predefined Model", command=self.select_predefined_model).pack(pady=10)
         tk.Button(root, text="Upload Model File", command=self.upload_model).pack(pady=10)
@@ -114,13 +169,11 @@ class ModelPredictionApp:
             messagebox.showinfo("File Selected", f"Model file loaded: {self.model_path}")
 
     def select_predefined_model(self):
-        # You can define paths to predefined models here
         predefined_models = {
             "Random Forest": "path_to_random_forest_model.joblib",
             "XGBoost": "path_to_xgboost_model.joblib"
         }
         
-        # Create a simple dropdown to choose a model
         model_window = tk.Toplevel(self.root)
         model_window.title("Select a Model")
         model_window.geometry("300x100")
@@ -145,7 +198,6 @@ class ModelPredictionApp:
             messagebox.showwarning("Input Error", "Please upload a CSV file for training")
             return
         
-        # Load the CSV to get column names
         try:
             data = pd.read_csv(self.csv_path)
         except Exception as e:
@@ -156,19 +208,14 @@ class ModelPredictionApp:
         target_column_window.title("Select Target Column")
         target_column_window.geometry("400x200")
 
-        # Get the column names from the dataset
         column_names = list(data.columns)
 
-        selected_target_column = tk.StringVar(target_column_window)
-        selected_target_column.set(column_names[0])
-
+        self.selected_target_column.set(column_names[0])
 
         tk.Label(target_column_window, text="Select the target column, this is the one you want to make predictions for:").pack(pady=10)
-        target_column_dropdown = tk.OptionMenu(target_column_window, selected_target_column, *column_names)
+        target_column_dropdown = tk.OptionMenu(target_column_window, self.selected_target_column, *column_names)
         target_column_dropdown.pack(pady=10)
 
-
-        # Create model type selection window
         model_type_var = tk.StringVar(target_column_window)
         model_type_var.set("RandomForest")  # Default to RandomForest
 
@@ -176,22 +223,27 @@ class ModelPredictionApp:
         model_type_dropdown = tk.OptionMenu(target_column_window, model_type_var, "RandomForest", "XGBoost")
         model_type_dropdown.pack(pady=10)
 
+        def save_model_with_features(model, feature_names, file_path):
+            """
+            Save the model along with feature names used during training.
+            """
+            # Adding feature names as an attribute to the model
+            model.feature_names_in_ = feature_names
+            joblib.dump(model, file_path)
 
         def confirm_training():
-            target_column = selected_target_column.get()
+            target_column = self.selected_target_column.get()
             model_type = model_type_var.get()
 
             try:
-                data_processed = preprocess_data(data)
+                data_processed = preprocess_data(data, target_column)
 
                 if target_column not in data_processed.columns:
                     messagebox.showwarning("Input Error", f"Target column '{target_column}' not found.")
                     return
 
-                # Train the model
                 trained_model = train_model(data_processed, target_column, model_type)
 
-                # Save the trained model
                 save_path = filedialog.asksaveasfilename(defaultextension=".joblib", filetypes=[("Joblib files", "*.joblib")])
                 if not save_path:
                     messagebox.showwarning("Save Error", "You must specify a file to save the trained model.")
@@ -203,11 +255,9 @@ class ModelPredictionApp:
             except Exception as e:
                 messagebox.showerror("Error", f"An error occurred during training: {e}")
 
-            # Close the window after training
             target_column_window.destroy()
 
         tk.Button(target_column_window, text="Train Model", command=confirm_training).pack(pady=10)
-
 
     def run_prediction(self):
         if not self.csv_path or not self.model_path:
@@ -215,67 +265,69 @@ class ModelPredictionApp:
             return
 
         try:
-            # Load the CSV file
             data = pd.read_csv(self.csv_path)
-            data_processed = preprocess_data(data)
 
-            # Create a new window to select the target column
             target_column_window = tk.Toplevel(self.root)
             target_column_window.title("Select Target Column")
             target_column_window.geometry("400x200")
 
-            # Get the column names from the dataset
             column_names = list(data.columns)
 
-            # Tkinter StringVar to hold the selected column
             selected_target_column = tk.StringVar(target_column_window)
-            selected_target_column.set(column_names[0])  # Default to the first column
+            selected_target_column.set(column_names[0])
 
-            # Create a label and dropdown (OptionMenu) for selecting the target column
             tk.Label(target_column_window, text="Select the target column used during training:").pack(pady=10)
             target_column_dropdown = tk.OptionMenu(target_column_window, selected_target_column, *column_names)
             target_column_dropdown.pack(pady=10)
 
-            # Define function to confirm the prediction
             def confirm_prediction():
                 target_column = selected_target_column.get()
 
-                # Preprocess data and ensure the target column is removed during prediction
+                data.columns = data.columns.astype(str)
+
+                model = load_model(self.model_path)
+                encoders = getattr(model, 'encoders', None)  # Retrieve saved encoders, if any
+
+                data_processed = preprocess_data(data, target_column, encoders)
+
                 if target_column in data_processed.columns:
                     data_processed_no_target = data_processed.drop(columns=[target_column])
+                else:
+                    data_processed_no_target = data_processed
 
-                try:
-                    # Load the model
-                    model = load_model(self.model_path)
+                # Debugging only: Print the columns used for prediction
+                print("Columns used for prediction:")
+                print(data_processed_no_target.columns)
 
-                    # Make predictions
-                    predictions = predict(data_processed_no_target, model)
+                if hasattr(model, 'feature_names_in_'):
+                    expected_features = set(str(f) for f in model.feature_names_in_)
+                    prediction_features = set(str(f) for f in data_processed_no_target.columns)
 
-                    # Save the output to a CSV file
-                    output_file = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV files", "*.csv")])
-                    if not output_file:
-                        messagebox.showwarning("Save Error", "You must specify a file to save the predictions.")
-                        return
+                    if expected_features != prediction_features:
+                        missing_in_data = expected_features - prediction_features
+                        extra_in_data = prediction_features - expected_features
+                        raise ValueError(f"Feature name mismatch:\nMissing in input data: {missing_in_data}\nExtra in input data: {extra_in_data}")
 
-                    predictions_df = pd.DataFrame(predictions, columns=['Prediction'])
-                    predictions_df.to_csv(output_file, index=False)
+                predictions = predict(data_processed_no_target, model)
 
-                    messagebox.showinfo("Success", f"Predictions saved to {output_file}")
+                output_file = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV files", "*.csv")])
+                if not output_file:
+                    messagebox.showwarning("Save Error", "You must specify a file to save the predictions.")
+                    return
 
-                except Exception as e:
-                    messagebox.showerror("Error", f"An error occurred during prediction: {e}")
+                predictions_df = pd.DataFrame(predictions, columns=['Prediction'])
+                predictions_df.to_csv(output_file, index=False)
 
-                # Close the window after prediction
+                messagebox.showinfo("Success", f"Predictions saved to {output_file}")
+
                 target_column_window.destroy()
 
-            # Button to confirm the selected target column and run the prediction
             tk.Button(target_column_window, text="Run Prediction", command=confirm_prediction).pack(pady=10)
 
         except Exception as e:
             messagebox.showerror("Error", f"An error occurred: {e}")
 
 
-# Running the app
 if __name__ == "__main__":
     root = tk.Tk()
     app = ModelPredictionApp(root)
